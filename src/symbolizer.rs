@@ -159,7 +159,7 @@ fn get_output_file(args: &CliArgs, input: &Path, output: &Path) -> Result<File> 
 ///
 /// This is used mainly to account for statistics; how many files were
 /// downloaded, etc.
-enum PdbKind {
+pub enum PdbKind {
     /// The PDB file was found on the file system but no in a symbol cache.
     Local,
     /// The PDB file was found on the file system in a local symbol cache.
@@ -169,7 +169,7 @@ enum PdbKind {
 }
 
 /// Try to find a PDB file online or locally from a [`PdbId`].
-fn get_pdb(
+pub fn get_pdb(
     sympath: &Path,
     symsrvs: &Vec<String>,
     pdb_id: &PdbId,

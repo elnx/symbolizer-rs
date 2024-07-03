@@ -10,15 +10,29 @@ mod pe;
 mod stats;
 mod symbolizer;
 
+use std::any::Any;
+use std::fmt::Debug;
+use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::{fs, io};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Context, Error, Ok, Result};
 use clap::{ArgAction, Parser, ValueEnum};
+use guid::Guid;
 use kdmp_parser::KernelDumpParser;
+use lief::pe::debug::Entries::CodeViewPDB;
+use lief::Binary;
 use misc::sympath;
+use pdb::{
+    AddressMap, FallibleIterator, LineProgram, PdbInternalSectionOffset, ProcedureSymbol,
+    StringTable, Symbol,
+};
 use symbolizer::Symbolizer;
+
+/// A PDB opened via file access.
+type Pdb<'p> = pdb::PDB<'p, File>;
 
 /// The style of the symbols.
 #[derive(Default, Debug, ValueEnum, Clone)]
@@ -74,6 +88,9 @@ struct CliArgs {
     /// The size in bytes of the buffer used to read data from the input files.
     #[arg(long, default_value_t = 1024 * 1024)]
     in_buffer_size: usize,
+    /// The PE file path.
+    #[arg(short, long)]
+    filepath: Option<PathBuf>,
 }
 
 fn main() -> Result<()> {
@@ -82,6 +99,69 @@ fn main() -> Result<()> {
 
     // Parse the CLI arguments.
     let args = CliArgs::parse();
+
+    // Figure out what is the symbol path we should be using. We will use the one
+    // specified by the user, or will try to find one in the `_NT_SYMBOL_PATH`
+    // environment variable if it is defined.
+    let Some(symcache) = (match args.symcache.clone() {
+        Some(symcache) => Some(symcache),
+        None => sympath(),
+    }) else {
+        bail!("no sympath");
+    };
+
+    if let Some(filepath) = &args.filepath {
+        let filepath = filepath.to_str().unwrap();
+
+        let mut pdbid = pe::PdbId::default();
+        if let Some(Binary::PE(pe)) = Binary::parse(filepath) {
+            for entry in pe.debug() {
+                if let CodeViewPDB(pdb_view) = entry {
+                    eprintln!(
+                        "{} {} {}",
+                        pdb_view.filename(),
+                        pdb_view.age(),
+                        pdb_view.guid()
+                    );
+                    pdbid.age = pdb_view.age();
+                    // println!("{}", pdb_view.guid().to_string().as_bytes().len());
+                    // let bytes: [u8; 16] = pdb_view.guid().to_string().as_bytes().try_into()?;
+                    pdbid.guid = Guid::from_str(pdb_view.guid().to_string().as_str()).unwrap();
+                    pdbid.path = PathBuf::from(pdb_view.filename());
+                    eprintln!("{}", pdbid);
+                    break;
+                }
+            }
+        }
+
+        let pdb_path = symbolizer::get_pdb(&symcache, &args.symsrv.clone(), &pdbid)?;
+
+        if let Some((pdb_path, pdb_kind)) = pdb_path {
+            let pdb_path: &std::path::Path = pdb_path.as_ref();
+            let pdb_file =
+                File::open(pdb_path).with_context(|| format!("failed to open pdb {pdb_path:?}"))?;
+            let mut pdb =
+                Pdb::open(pdb_file).with_context(|| format!("failed to parse pdb {pdb_path:?}"))?;
+
+            let symbol_table = pdb.global_symbols()?;
+            let address_map = pdb.address_map()?;
+
+            let mut symbols = symbol_table.iter();
+            while let Some(symbol) = symbols.next()? {
+                match symbol.parse() {
+                    std::result::Result::Ok(pdb::SymbolData::Public(data)) if data.function||data.code => {
+                        // we found the location of a function!
+                        let rva = data.offset.to_rva(&address_map).unwrap_or_default();
+                        println!("{},{}", data.name, rva);
+                    }
+                    _ => {}
+                }
+            }
+            eprintln!("pdb download ok: {}", pdb_path.to_str().unwrap());
+        }
+    }
+
+    return Ok(());
 
     // Figure out the path to the crash-dump we will use. We will use the one
     // specified by the user, or we will try to find one ourselves.
@@ -106,16 +186,6 @@ fn main() -> Result<()> {
     // are loaded at, and to read enough information out of the PE to download PDB
     // files ourselves.
     let parser = KernelDumpParser::new(&crash_dump_path).context("failed to create dump parser")?;
-
-    // Figure out what is the symbol path we should be using. We will use the one
-    // specified by the user, or will try to find one in the `_NT_SYMBOL_PATH`
-    // environment variable if it is defined.
-    let Some(symcache) = (match args.symcache.clone() {
-        Some(symcache) => Some(symcache),
-        None => sympath(),
-    }) else {
-        bail!("no sympath");
-    };
 
     // All right, ready to create the symbolizer.
     let mut symbolizer = Symbolizer::new(symcache, parser, args.symsrv.clone())?;

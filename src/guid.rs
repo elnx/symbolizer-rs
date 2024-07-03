@@ -22,6 +22,29 @@ impl From<[u8; 16]> for Guid {
     }
 }
 
+use std::str::FromStr;
+
+impl FromStr for Guid {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let parts: Vec<&str> = s.split('-').collect();
+        if parts.len() != 5 {
+            return Err("Invalid GUID format".to_string());
+        }
+
+        let d0 = u32::from_str_radix(parts[0], 16).map_err(|e| format!("Invalid parse: {}", e))?;
+        let d1 = u16::from_str_radix(parts[1], 16).map_err(|e| format!("Invalid parse: {}", e))?;
+        let d2 = u16::from_str_radix(parts[2], 16).map_err(|e| format!("Invalid parse: {}", e))?;
+
+        let d3_part = parts[3].to_owned() + parts[4]; // 使用 to_owned() 转换 &str 为 String
+
+        let d3 = hex::decode(d3_part).unwrap().try_into().unwrap();
+
+        Ok(Guid { d0, d1, d2, d3 })
+    }
+}
+
 impl Display for Guid {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_fmt(format_args!(
